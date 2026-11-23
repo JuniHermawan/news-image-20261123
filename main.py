@@ -1,75 +1,98 @@
 #!/usr/bin/env python3
-"""Entry program for the 23 November 2026 world-news image.
+"""news-image-20261123: validate and copy the pre-drawn entry image.
 
-The picture itself was drawn beforehand (with Pillow, at build time)
-and is stored in this repository as entry.png. This program only places
-an exact copy of it at $MAKEFUN_OUTPUT_DIR/entry.png, so the graded run
-needs nothing beyond the Python standard library: no network, no extra
-packages, nothing to install.
+The entry image (entry.png, drawn at build time) ships next to this script.
+At grade time the environment is Python 3.13 standard library only, so this
+program deliberately imports nothing beyond the stdlib. It checks that
+entry.png is a real PNG within the size limits, then copies it byte-for-byte
+into $MAKEFUN_OUTPUT_DIR (default /output) and verifies the copy.
 
-Before copying it checks the file is really a PNG inside the
-competition limits (at most 1 MiB, at most 1024 pixels on a side),
-then confirms the copy byte for byte, so the two graded runs always
-produce identical output.
+Usage:
+    MAKEFUN_OUTPUT_DIR=out python3 main.py
 """
 
 import hashlib
 import os
-import shutil
 import struct
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-IMAGE = os.path.join(HERE, "entry.png")
-
-MAX_BYTES = 1_048_576
-MAX_SIDE = 1024
-MAGIC = b"\x89PNG\r\n\x1a\n"
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_DIMENSION = 1024
+MAX_BYTES = 1_048_576  # 1 MiB
 
 
-def file_sha256(path):
-    """SHA-256 hex digest of a file's whole contents."""
-    digest = hashlib.sha256()
+def fail(message):
+    print("error: " + message, file=sys.stderr)
+    return 1
+
+
+def read_png_dimensions(path):
+    """Return (width, height) from a PNG's IHDR chunk, or None if invalid."""
     with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def png_dimensions(path):
-    """(width, height) from the PNG IHDR chunk; raises on bad input."""
-    with open(path, "rb") as handle:
-        head = handle.read(33)
-    if head[:8] != MAGIC:
-        raise ValueError("entry.png: bad magic bytes, not a PNG file")
-    if head[12:16] != b"IHDR":
-        raise ValueError("entry.png: IHDR chunk missing, not a PNG file")
-    width, height = struct.unpack(">II", head[16:24])
+        header = handle.read(33)
+    if len(header) < 33:
+        return None
+    if header[:8] != PNG_SIGNATURE:
+        return None
+    # First chunk must be IHDR: 4-byte length, 4-byte type, 13-byte data.
+    length, chunk_type = struct.unpack(">I4s", header[8:16])
+    if chunk_type != b"IHDR" or length != 13:
+        return None
+    width, height = struct.unpack(">II", header[16:24])
     return width, height
 
 
+def sha256_of(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(65536), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def main():
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    if not os.path.isfile(IMAGE):
-        print("error: entry.png is missing from the repository", file=sys.stderr)
-        return 1
-    n_bytes = os.path.getsize(IMAGE)
-    if n_bytes > MAX_BYTES:
-        print(f"error: entry.png is {n_bytes} bytes, over the 1 MiB limit",
-              file=sys.stderr)
-        return 1
-    width, height = png_dimensions(IMAGE)
-    if width > MAX_SIDE or height > MAX_SIDE:
-        print(f"error: entry.png is {width}x{height}, over the 1024x1024 limit",
-              file=sys.stderr)
-        return 1
-    os.makedirs(out_dir, exist_ok=True)
-    target = os.path.join(out_dir, "entry.png")
-    shutil.copyfile(IMAGE, target)
-    if file_sha256(IMAGE) != file_sha256(target):
-        print("error: copied file does not match the source", file=sys.stderr)
-        return 1
-    print(f"wrote {target} ({width}x{height}, {n_bytes} bytes)")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    source = os.path.join(script_dir, "entry.png")
+    if not os.path.isfile(source):
+        return fail("entry.png not found next to main.py (%s)" % source)
+
+    size = os.path.getsize(source)
+    if size > MAX_BYTES:
+        return fail(
+            "entry.png is %d bytes, over the %d-byte limit" % (size, MAX_BYTES)
+        )
+
+    dimensions = read_png_dimensions(source)
+    if dimensions is None:
+        return fail("entry.png is not a valid PNG (bad signature or IHDR)")
+    width, height = dimensions
+    if width > MAX_DIMENSION or height > MAX_DIMENSION:
+        return fail(
+            "entry.png is %dx%d, over the %dx%d limit"
+            % (width, height, MAX_DIMENSION, MAX_DIMENSION)
+        )
+
+    output_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except OSError as exc:
+        return fail("cannot create output directory %s: %s" % (output_dir, exc))
+    target = os.path.join(output_dir, "entry.png")
+
+    try:
+        with open(source, "rb") as src, open(target, "wb") as dst:
+            for block in iter(lambda: src.read(65536), b""):
+                dst.write(block)
+    except OSError as exc:
+        return fail("copy failed: %s" % exc)
+
+    if sha256_of(target) != sha256_of(source):
+        return fail("copy verification failed: SHA-256 mismatch")
+
+    print(
+        "wrote %s (%dx%d, %d bytes)"
+        % (target, width, height, size)
+    )
     return 0
 
 
